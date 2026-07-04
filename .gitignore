@@ -93,6 +93,16 @@
 **/go.work
 **/Cargo.lock
 
+# Android
+**/build/
+**/.cxx/
+*.apk
+*.aab
+local.properties
+
+# Android NDK built libs exception for stub assets
+!app/src/main/assets/stub_libs/**/*.so
+
 # Ruby
 *.gem
 *.rbc

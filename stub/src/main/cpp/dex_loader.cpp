@@ -1,0 +1,287 @@
+#include <jni.h>
+#include <dlfcn.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <android/log.h>
+#include <string.h>
+#include <stdlib.h>
+
+#define LOG_TAG "dexprotector"
+#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+
+#define MAGIC_LO 0x58455044ULL
+
+static uint8_t* g_dex_data = NULL;
+static size_t   g_dex_len = 0;
+
+static const uint8_t sbox[256] = {
+    0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
+    0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
+    0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,
+    0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,
+    0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,
+    0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,
+    0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,
+    0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,
+    0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,
+    0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,
+    0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,
+    0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,
+    0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,
+    0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,
+    0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,
+    0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16
+};
+
+static const uint8_t inv_sbox[256] = {
+    0x52,0x09,0x6a,0xd5,0x30,0x36,0xa5,0x38,0xbf,0x40,0xa3,0x9e,0x81,0xf3,0xd7,0xfb,
+    0x7c,0xe3,0x39,0x82,0x9b,0x2f,0xff,0x87,0x34,0x8e,0x43,0x44,0xc4,0xde,0xe9,0xcb,
+    0x54,0x7b,0x94,0x32,0xa6,0xc2,0x23,0x3d,0xee,0x4c,0x95,0x0b,0x42,0xfa,0xc3,0x4e,
+    0x08,0x2e,0xa1,0x66,0x28,0xd9,0x24,0xb2,0x76,0x5b,0xa2,0x49,0x6d,0x8b,0xd1,0x25,
+    0x72,0xf8,0xf6,0x64,0x86,0x68,0x98,0x16,0xd4,0xa4,0x5c,0xcc,0x5d,0x65,0xb6,0x92,
+    0x6c,0x70,0x48,0x50,0xfd,0xed,0xb9,0xda,0x5e,0x15,0x46,0x57,0xa7,0x8d,0x9d,0x84,
+    0x90,0xd8,0xab,0x00,0x8c,0xbc,0xd3,0x0a,0xf7,0xe4,0x58,0x05,0xb8,0xb3,0x45,0x06,
+    0xd0,0x2c,0x1e,0x8f,0xca,0x3f,0x0f,0x02,0xc1,0xaf,0xbd,0x03,0x01,0x13,0x8a,0x6b,
+    0x3a,0x91,0x11,0x41,0x4f,0x67,0xdc,0xea,0x97,0xf2,0xcf,0xce,0xf0,0xb4,0xe6,0x73,
+    0x96,0xac,0x74,0x22,0xe7,0xad,0x35,0x85,0xe2,0xf9,0x37,0xe8,0x1c,0x75,0xdf,0x6e,
+    0x47,0xf1,0x1a,0x71,0x1d,0x29,0xc5,0x89,0x6f,0xb7,0x62,0x0e,0xaa,0x18,0xbe,0x1b,
+    0xfc,0x56,0x3e,0x4b,0xc6,0xd2,0x79,0x20,0x9a,0xdb,0xc0,0xfe,0x78,0xcd,0x5a,0xf4,
+    0x1f,0xdd,0xa8,0x33,0x88,0x07,0xc7,0x31,0xb1,0x12,0x10,0x59,0x27,0x80,0xec,0x5f,
+    0x60,0x51,0x7f,0xa9,0x19,0xb5,0x4a,0x0d,0x2d,0xe5,0x7a,0x9f,0x93,0xc9,0x9c,0xef,
+    0xa0,0xe0,0x3b,0x4d,0xae,0x2a,0xf5,0xb0,0xc8,0xeb,0xbb,0x3c,0x83,0x53,0x99,0x61,
+    0x17,0x2b,0x04,0x7e,0xba,0x77,0xd6,0x26,0xe1,0x69,0x14,0x63,0x55,0x21,0x0c,0x7d
+};
+
+static const uint8_t rcon[11] = {
+    0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36
+};
+
+typedef struct {
+    uint8_t round_keys[240];
+    int rounds;
+} aes_ctx_t;
+
+static uint8_t gf_mul(uint8_t a, uint8_t b) {
+    uint8_t p = 0;
+    for (int i = 0; i < 8; i++) {
+        if (b & 1) p ^= a;
+        uint8_t hi = a & 0x80;
+        a <<= 1;
+        if (hi) a ^= 0x1b;
+        b >>= 1;
+    }
+    return p;
+}
+
+static void key_expansion(const uint8_t* key, int key_bits, aes_ctx_t* ctx) {
+    int nk = key_bits / 32;
+    ctx->rounds = nk + 6;
+    int total = 4 * (ctx->rounds + 1);
+    for (int i = 0; i < nk * 4; i++) ctx->round_keys[i] = key[i];
+    for (int i = nk; i < total; i++) {
+        uint8_t temp[4];
+        for (int j = 0; j < 4; j++) temp[j] = ctx->round_keys[(i-1)*4+j];
+        if (i % nk == 0) {
+            uint8_t t = temp[0];
+            temp[0] = sbox[temp[1]] ^ rcon[i/nk];
+            temp[1] = sbox[temp[2]];
+            temp[2] = sbox[temp[3]];
+            temp[3] = sbox[t];
+        } else if (nk > 6 && i % nk == 4) {
+            for (int j = 0; j < 4; j++) temp[j] = sbox[temp[j]];
+        }
+        for (int j = 0; j < 4; j++)
+            ctx->round_keys[i*4+j] = ctx->round_keys[(i-nk)*4+j] ^ temp[j];
+    }
+}
+
+static void add_round_key(uint8_t* state, const uint8_t* rk) {
+    for (int i = 0; i < 16; i++) state[i] ^= rk[i];
+}
+
+static void inv_sub_bytes(uint8_t* s) {
+    for (int i = 0; i < 16; i++) s[i] = inv_sbox[s[i]];
+}
+
+static void inv_shift_rows(uint8_t* s) {
+    uint8_t t;
+    t=s[13]; s[13]=s[9]; s[9]=s[5]; s[5]=s[1]; s[1]=t;
+    t=s[2]; s[2]=s[14]; uint8_t t2=s[10]; s[10]=s[6]; s[6]=t; s[14]=t2;
+    t=s[3]; s[3]=s[7]; s[7]=s[11]; s[11]=s[15]; s[15]=t;
+}
+
+static void inv_mix_columns(uint8_t* s) {
+    for (int i = 0; i < 4; i++) {
+        int c = i*4;
+        uint8_t a0=s[c],a1=s[c+1],a2=s[c+2],a3=s[c+3];
+        s[c]  =gf_mul(a0,14)^gf_mul(a1,11)^gf_mul(a2,13)^gf_mul(a3,9);
+        s[c+1]=gf_mul(a0,9) ^gf_mul(a1,14)^gf_mul(a2,11)^gf_mul(a3,13);
+        s[c+2]=gf_mul(a0,13)^gf_mul(a1,9) ^gf_mul(a2,14)^gf_mul(a3,11);
+        s[c+3]=gf_mul(a0,11)^gf_mul(a1,13)^gf_mul(a2,9) ^gf_mul(a3,14);
+    }
+}
+
+static void aes_init(const uint8_t* key, int key_bits, aes_ctx_t* ctx) {
+    key_expansion(key, key_bits, ctx);
+}
+
+static void aes_decrypt_block(const uint8_t* in, uint8_t* out, const aes_ctx_t* ctx) {
+    uint8_t s[16];
+    memcpy(s, in, 16);
+    add_round_key(s, ctx->round_keys + ctx->rounds*16);
+    for (int r = ctx->rounds-1; r >= 1; r--) {
+        inv_shift_rows(s);
+        inv_sub_bytes(s);
+        add_round_key(s, ctx->round_keys + r*16);
+        inv_mix_columns(s);
+    }
+    inv_shift_rows(s);
+    inv_sub_bytes(s);
+    add_round_key(s, ctx->round_keys);
+    memcpy(out, s, 16);
+}
+
+static int aes_cbc_decrypt(uint8_t* data, size_t len, const uint8_t* key, const uint8_t* iv) {
+    if (len % 16 != 0 || len < 16) return -1;
+    aes_ctx_t ctx;
+    aes_init(key, 256, &ctx);
+    uint8_t prev[16], dec[16];
+    memcpy(prev, iv, 16);
+    for (size_t off = 0; off < len; off += 16) {
+        aes_decrypt_block(data+off, dec, &ctx);
+        for (int i = 0; i < 16; i++) dec[i] ^= prev[i];
+        memcpy(prev, data+off, 16);
+        memcpy(data+off, dec, 16);
+    }
+    uint8_t pad = data[len-1];
+    if (pad == 0 || pad > 16) return -1;
+    for (int i = 1; i <= (int)pad; i++)
+        if (data[len-i] != pad) return -1;
+    return (int)(len - pad);
+}
+
+static uint32_t read_le32(const uint8_t* p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1]<<8) | ((uint32_t)p[2]<<16) | ((uint32_t)p[3]<<24);
+}
+
+static char* find_self_path() {
+    Dl_info info;
+    if (dladdr((void*)find_self_path, &info) && info.dli_fname)
+        return strdup(info.dli_fname);
+
+    FILE* fp = fopen("/proc/self/maps", "r");
+    if (!fp) return NULL;
+    char* line = NULL;
+    size_t llen = 0;
+    char* path = NULL;
+    while (getline(&line, &llen, fp) != -1) {
+        if (strstr(line, "libdexprotector.so")) {
+            char* start = strchr(line, '/');
+            if (start) {
+                char* end = strchr(start, '\n');
+                if (end) *end = '\0';
+                path = strdup(start);
+            }
+            break;
+        }
+    }
+    free(line);
+    fclose(fp);
+    return path;
+}
+
+static int find_and_decrypt(int fd, uint8_t** out_dex, size_t* out_len) {
+    struct stat st;
+    if (fstat(fd, &st) != 0) return -1;
+    size_t file_size = (size_t)st.st_size;
+    if (file_size < 16) return -1;
+
+    uint8_t* map = (uint8_t*)mmap(NULL, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (map == MAP_FAILED) return -1;
+
+    uint8_t* trailer_ptr = NULL;
+    size_t search_end = file_size - 16;
+    for (size_t off = search_end; off > 0; off--) {
+        if (*(uint64_t*)(map+off) == MAGIC_LO) {
+            trailer_ptr = map + off;
+            break;
+        }
+    }
+    if (!trailer_ptr) { munmap(map, file_size); return -1; }
+
+    uint32_t trailer_size = read_le32(trailer_ptr + 8);
+    uint8_t* data_start = map + file_size - trailer_size;
+
+    uint32_t dex_sz  = read_le32(data_start);
+    uint32_t key_sz  = read_le32(data_start + 4);
+    uint32_t iv_sz   = read_le32(data_start + 8);
+
+    uint8_t* dex_buf  = data_start + 16;
+    uint8_t* key_buf  = dex_buf + dex_sz;
+    uint8_t* iv_buf   = key_buf + key_sz;
+
+    if (dex_buf + dex_sz > trailer_ptr || key_buf + key_sz > trailer_ptr || iv_buf + iv_sz > trailer_ptr) {
+        munmap(map, file_size); return -1;
+    }
+
+    uint8_t* work = (uint8_t*)malloc(dex_sz);
+    memcpy(work, dex_buf, dex_sz);
+
+    int real_len = aes_cbc_decrypt(work, dex_sz, key_buf, iv_buf);
+    munmap(map, file_size);
+
+    if (real_len < 0) { free(work); return -1; }
+
+    *out_dex = work;
+    *out_len = (size_t)real_len;
+    return 0;
+}
+
+JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void* reserved) {
+    JNIEnv* env = NULL;
+    if (vm->GetEnv((void**)&env, JNI_VERSION_1_6) != JNI_OK) return JNI_ERR;
+
+    LOGD("DexProtector JNI_OnLoad - starting DEX extraction");
+
+    char* self_path = find_self_path();
+    if (!self_path) {
+        LOGE("Cannot find self path");
+        return JNI_VERSION_1_6;
+    }
+
+    int fd = open(self_path, O_RDONLY);
+    free(self_path);
+    if (fd < 0) {
+        LOGE("Cannot open self");
+        return JNI_VERSION_1_6;
+    }
+
+    if (find_and_decrypt(fd, &g_dex_data, &g_dex_len) != 0) {
+        LOGE("No DEX trailer found or decryption failed");
+    } else {
+        LOGD("DEX extracted and decrypted: %zu bytes", g_dex_len);
+    }
+    close(fd);
+
+    return JNI_VERSION_1_6;
+}
+
+JNIEXPORT jbyteArray JNICALL
+Java_com_dexprotector_stub_StubApplication_getDexData(JNIEnv* env, jobject thiz) {
+    if (!g_dex_data || g_dex_len == 0) return NULL;
+    jbyteArray arr = env->NewByteArray((jsize)g_dex_len);
+    env->SetByteArrayRegion(arr, 0, (jsize)g_dex_len, (jbyte*)g_dex_data);
+    return arr;
+}
+
+JNIEXPORT void JNICALL
+Java_com_dexprotector_stub_StubApplication_releaseDexData(JNIEnv* env, jobject thiz) {
+    if (g_dex_data) {
+        free(g_dex_data);
+        g_dex_data = NULL;
+        g_dex_len = 0;
+    }
+}
